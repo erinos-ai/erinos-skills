@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Restyle an image using Flux.1 img2img via ComfyUI.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: restyle --input <path> --prompt <style> [options]
+       restyle --image <drive_id> --prompt <style> [options]
+
+Options:
+  --input <path>          Local file to restyle
+  --image <id>            Google Drive file ID to restyle
+  --prompt <text>         Target style description
+  --strength <0.0-1.0>    How much to change (default: 0.65)
+  --steps <n>             Sampling steps (default: 28)
+  --seed <n>              Random seed (default: random)
+  --output <path>         Local output path
+  --output-folder <id>    Google Drive folder ID to upload result
+EOF
+  exit 1
+}
+
+COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
+INPUT="" IMAGE_ID="" PROMPT="" STRENGTH=0.65 STEPS=28 SEED=$RANDOM
+OUTPUT="" OUTPUT_FOLDER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --input)         INPUT="$2"; shift 2 ;;
+    --image)         IMAGE_ID="$2"; shift 2 ;;
+    --prompt)        PROMPT="$2"; shift 2 ;;
+    --strength)      STRENGTH="$2"; shift 2 ;;
+    --steps)         STEPS="$2"; shift 2 ;;
+    --seed)          SEED="$2"; shift 2 ;;
+    --output)        OUTPUT="$2"; shift 2 ;;
+    --output-folder) OUTPUT_FOLDER="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -z "$INPUT" && -z "$IMAGE_ID" ]] && { echo "Error: --input or --image required"; usage; }
+[[ -z "$PROMPT" ]] && { echo "Error: --prompt is required"; usage; }
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+# ── Resolve input ─────────────────────────────────────────────────────
+if [[ -n "$IMAGE_ID" ]]; then
+  echo "Downloading from Drive..."
+  INPUT="$TMPDIR/input.png"
+  gws drive files get \
+    --params "{\"fileId\": \"$IMAGE_ID\", \"alt\": \"media\"}" \
+    -o "$INPUT"
+fi
+
+[[ -s "$INPUT" ]] || { echo "Error: input file is empty or missing"; exit 1; }
+BASENAME=$(basename "${INPUT%.*}")
+
+# ── Upload to ComfyUI ────────────────────────────────────────────────
+echo "Uploading to ComfyUI..."
+UPLOAD_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/upload/image" \
+  -F "image=@$INPUT;filename=input.png" \
+  -F "overwrite=true")
+UPLOAD_NAME=$(echo "$UPLOAD_RESPONSE" | jq -r '.name // empty')
+[[ -n "$UPLOAD_NAME" ]] || { echo "Error: upload failed: $UPLOAD_RESPONSE"; exit 1; }
+
+# ── Queue restyle workflow ────────────────────────────────────────────
+ESCAPED_PROMPT=$(printf '%s' "$PROMPT" | jq -Rs '.')
+
+WORKFLOW=$(cat <<WORKFLOW_EOF
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux1-dev.safetensors", "weight_dtype": "default" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": { "clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn.safetensors", "type": "flux" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": $ESCAPED_PROMPT, "clip": ["2", 0] }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "", "clip": ["2", 0] }
+  },
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "6": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "$UPLOAD_NAME" }
+  },
+  "7": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["6", 0],
+      "vae": ["5", 0]
+    }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "latent_image": ["7", 0],
+      "seed": $SEED,
+      "steps": $STEPS,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": $STRENGTH
+    }
+  },
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["8", 0], "vae": ["5", 0] }
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["9", 0], "filename_prefix": "restyle" }
+  }
+}
+WORKFLOW_EOF
+)
+
+echo "Restyling (seed=$SEED, strength=$STRENGTH, steps=$STEPS)..."
+QUEUE_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/prompt" \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\": $WORKFLOW}")
+PROMPT_ID=$(echo "$QUEUE_RESPONSE" | jq -r '.prompt_id // empty')
+[[ -n "$PROMPT_ID" ]] || { echo "Error: failed to queue: $QUEUE_RESPONSE"; exit 1; }
+
+# ── Poll for completion ───────────────────────────────────────────────
+for i in $(seq 1 120); do
+  HISTORY=$(curl -sf "$COMFYUI_URL/history/$PROMPT_ID")
+  STATUS=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.completed // empty")
+
+  if [[ "$STATUS" == "true" ]]; then
+    FILENAME=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].outputs[\"10\"].images[0].filename // empty")
+    [[ -n "$FILENAME" ]] && break
+  fi
+
+  ERROR=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.status_str // empty")
+  [[ "$ERROR" == "error" ]] && { echo "Error: restyle failed"; exit 1; }
+
+  sleep 5
+done
+[[ -n "${FILENAME:-}" ]] || { echo "Error: timed out"; exit 1; }
+
+# ── Download result ───────────────────────────────────────────────────
+curl -sf "$COMFYUI_URL/view?filename=$FILENAME&subfolder=&type=output" \
+  -o "$TMPDIR/output.png"
+
+# ── Output ────────────────────────────────────────────────────────────
+if [[ -n "$OUTPUT_FOLDER" ]]; then
+  echo "Uploading to Drive..."
+  gws drive files create \
+    --params '{"uploadType": "multipart"}' \
+    --json "{\"name\": \"${BASENAME}_restyled.png\", \"parents\": [\"$OUTPUT_FOLDER\"]}" \
+    --upload "$TMPDIR/output.png" \
+    --fields "id,name,webViewLink"
+else
+  OUTPUT="${OUTPUT:-/tmp/${BASENAME}_restyled_${SEED}.png}"
+  cp "$TMPDIR/output.png" "$OUTPUT"
+  echo "Saved to: $OUTPUT"
+fi
+
+echo "Done. Seed=$SEED (use same seed to reproduce)."

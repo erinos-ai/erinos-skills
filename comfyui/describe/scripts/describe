@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Describe an image using Florence-2 via ComfyUI.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: describe --input <path> [options]
+       describe --image <drive_file_id> [options]
+
+Options:
+  --input <path>    Local image file
+  --image <id>      Google Drive file ID
+  --task <type>     caption, detailed, or more_detailed (default: detailed)
+EOF
+  exit 1
+}
+
+COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
+INPUT="" IMAGE_ID="" TASK="detailed"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --input) INPUT="$2"; shift 2 ;;
+    --image) IMAGE_ID="$2"; shift 2 ;;
+    --task)  TASK="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -z "$INPUT" && -z "$IMAGE_ID" ]] && { echo "Error: --input or --image required"; usage; }
+
+# Map task to Florence-2 prompt
+case "$TASK" in
+  caption)        FLORENCE_TASK="<CAPTION>" ;;
+  detailed)       FLORENCE_TASK="<DETAILED_CAPTION>" ;;
+  more_detailed)  FLORENCE_TASK="<MORE_DETAILED_CAPTION>" ;;
+  *) echo "Error: unknown task '$TASK'. Use: caption, detailed, more_detailed"; exit 1 ;;
+esac
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+# ── Resolve input ─────────────────────────────────────────────────────
+if [[ -n "$IMAGE_ID" ]]; then
+  INPUT="$TMPDIR/input.png"
+  gws drive files get \
+    --params "{\"fileId\": \"$IMAGE_ID\", \"alt\": \"media\"}" \
+    -o "$INPUT" 2>/dev/null
+fi
+
+[[ -s "$INPUT" ]] || { echo "Error: input file is empty or missing"; exit 1; }
+
+# ── Upload to ComfyUI ────────────────────────────────────────────────
+UPLOAD_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/upload/image" \
+  -F "image=@$INPUT;filename=input.png" -F "overwrite=true")
+UPLOAD_NAME=$(echo "$UPLOAD_RESPONSE" | jq -r '.name // empty')
+[[ -n "$UPLOAD_NAME" ]] || { echo "Error: upload failed"; exit 1; }
+
+# ── Queue describe workflow ───────────────────────────────────────────
+WORKFLOW=$(cat <<WORKFLOW_EOF
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "$UPLOAD_NAME" }
+  },
+  "2": {
+    "class_type": "DownloadAndLoadFlorence2Model",
+    "inputs": {
+      "model": "microsoft/Florence-2-large",
+      "precision": "fp16",
+      "attention": "sdpa"
+    }
+  },
+  "3": {
+    "class_type": "Florence2Run",
+    "inputs": {
+      "image": ["1", 0],
+      "florence2_model": ["2", 0],
+      "text_input": "",
+      "task": "$FLORENCE_TASK",
+      "fill_mask": "",
+      "keep_model_loaded": false,
+      "max_new_tokens": 1024,
+      "num_beams": 3,
+      "do_sample": false,
+      "output_mask_select": ""
+    }
+  },
+  "4": {
+    "class_type": "ShowText|pysssss",
+    "inputs": { "text": ["3", 0] }
+  }
+}
+WORKFLOW_EOF
+)
+
+QUEUE_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/prompt" \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\": $WORKFLOW}")
+PROMPT_ID=$(echo "$QUEUE_RESPONSE" | jq -r '.prompt_id // empty')
+[[ -n "$PROMPT_ID" ]] || { echo "Error: failed to queue: $QUEUE_RESPONSE"; exit 1; }
+
+# ── Poll for completion ───────────────────────────────────────────────
+for i in $(seq 1 60); do
+  HISTORY=$(curl -sf "$COMFYUI_URL/history/$PROMPT_ID")
+  STATUS=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.completed // empty")
+
+  if [[ "$STATUS" == "true" ]]; then
+    # Extract text from ShowText node output
+    DESCRIPTION=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].outputs[\"4\"].text[0] // empty")
+    [[ -n "$DESCRIPTION" ]] && break
+  fi
+
+  ERROR=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.status_str // empty")
+  [[ "$ERROR" == "error" ]] && { echo "Error: describe failed"; exit 1; }
+
+  sleep 3
+done
+
+[[ -n "${DESCRIPTION:-}" ]] || { echo "Error: timed out"; exit 1; }
+
+echo "$DESCRIPTION"
