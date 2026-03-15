@@ -1,4 +1,2 @@
 auth:
-  type: local
-env:
-  COMFYUI_URL: url
+  type: none

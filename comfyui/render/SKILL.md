@@ -108,11 +108,9 @@ git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git
 cd comfyui_controlnet_aux && pip install -r requirements.txt
 ```
 
-### 5. Start ComfyUI and store credentials
+### 5. Start ComfyUI
 
 ```bash
 cd ~/ComfyUI && source venv/bin/activate
 python main.py --listen 0.0.0.0 --port 8188
 ```
-
-Then tell Erin: "Store my ComfyUI credentials: URL is http://localhost:8188"

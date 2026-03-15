@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render a SketchUp export into a photorealistic image using ComfyUI + Flux.1.
-# Requires: COMFYUI_URL, GOOGLE_WORKSPACE_CLI_TOKEN (injected by RunCommand)
+# Requires: GOOGLE_WORKSPACE_CLI_TOKEN (injected by RunCommand)
 set -euo pipefail
 
 usage() {
@@ -42,7 +42,7 @@ done
 
 [[ -z "$IMAGE_ID" ]] && { echo "Error: --image is required"; usage; }
 [[ -z "$PROMPT" ]] && { echo "Error: --prompt is required"; usage; }
-[[ -z "$COMFYUI_URL" ]] && { echo "Error: COMFYUI_URL not set"; exit 1; }
+COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
