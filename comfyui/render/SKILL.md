@@ -27,10 +27,12 @@ render --image <drive_file_id> --prompt "<description>" [options]
 ## What it does
 
 1. Downloads the input image from Google Drive
-2. Uploads it to ComfyUI
-3. Runs the Flux.1 + ControlNet depth workflow with the given prompt
+2. Sends it to the local ComfyUI API (`localhost:8188`)
+3. Runs the Flux.1 + ControlNet depth workflow locally on the appliance GPU
 4. Polls until rendering is complete
 5. Uploads the result to Drive (if `--renders-folder` is provided) or saves to `/tmp/`
+
+All rendering happens locally — only Google Drive access is remote.
 
 ## Finding the input image
 
