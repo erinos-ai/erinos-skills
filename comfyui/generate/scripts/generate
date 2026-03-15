@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Generate an image from a text prompt using Flux.1 via ComfyUI.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: generate --prompt <text> [options]
+
+Options:
+  --prompt <text>         What to generate
+  --width <n>             Output width (default: 1024)
+  --height <n>            Output height (default: 1024)
+  --steps <n>             Sampling steps (default: 28)
+  --seed <n>              Random seed (default: random)
+  --cfg <n>               Guidance scale (default: 3.5)
+  --output <path>         Local output path
+  --output-folder <id>    Google Drive folder ID to upload result
+  --variations <n>        Generate multiple images (default: 1)
+EOF
+  exit 1
+}
+
+COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
+PROMPT="" WIDTH=1024 HEIGHT=1024 STEPS=28 SEED=$RANDOM CFG=3.5
+OUTPUT="" OUTPUT_FOLDER="" VARIATIONS=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prompt)        PROMPT="$2"; shift 2 ;;
+    --width)         WIDTH="$2"; shift 2 ;;
+    --height)        HEIGHT="$2"; shift 2 ;;
+    --steps)         STEPS="$2"; shift 2 ;;
+    --seed)          SEED="$2"; shift 2 ;;
+    --cfg)           CFG="$2"; shift 2 ;;
+    --output)        OUTPUT="$2"; shift 2 ;;
+    --output-folder) OUTPUT_FOLDER="$2"; shift 2 ;;
+    --variations)    VARIATIONS="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -z "$PROMPT" ]] && { echo "Error: --prompt is required"; usage; }
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+ESCAPED_PROMPT=$(printf '%s' "$PROMPT" | jq -Rs '.')
+
+run_generation() {
+  local seed="$1"
+
+  WORKFLOW=$(cat <<WORKFLOW_EOF
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux1-dev.safetensors", "weight_dtype": "default" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": { "clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn.safetensors", "type": "flux" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": $ESCAPED_PROMPT, "clip": ["2", 0] }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "", "clip": ["2", 0] }
+  },
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "6": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": { "width": $WIDTH, "height": $HEIGHT, "batch_size": 1 }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "latent_image": ["6", 0],
+      "seed": $seed,
+      "steps": $STEPS,
+      "cfg": $CFG,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["7", 0], "vae": ["5", 0] }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["8", 0], "filename_prefix": "generate" }
+  }
+}
+WORKFLOW_EOF
+  )
+
+  QUEUE_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/prompt" \
+    -H "Content-Type: application/json" \
+    -d "{\"prompt\": $WORKFLOW}")
+  local prompt_id
+  prompt_id=$(echo "$QUEUE_RESPONSE" | jq -r '.prompt_id // empty')
+  [[ -n "$prompt_id" ]] || { echo "Error: failed to queue: $QUEUE_RESPONSE"; return 1; }
+
+  for i in $(seq 1 120); do
+    HISTORY=$(curl -sf "$COMFYUI_URL/history/$prompt_id")
+    local status
+    status=$(echo "$HISTORY" | jq -r ".[\"$prompt_id\"].status.completed // empty")
+
+    if [[ "$status" == "true" ]]; then
+      local filename
+      filename=$(echo "$HISTORY" | jq -r ".[\"$prompt_id\"].outputs[\"9\"].images[0].filename // empty")
+      if [[ -n "$filename" ]]; then
+        curl -sf "$COMFYUI_URL/view?filename=$filename&subfolder=&type=output" \
+          -o "$TMPDIR/output_${seed}.png"
+        echo "$seed"
+        return 0
+      fi
+    fi
+
+    local err
+    err=$(echo "$HISTORY" | jq -r ".[\"$prompt_id\"].status.status_str // empty")
+    [[ "$err" == "error" ]] && { echo "Error: generation failed (seed=$seed)"; return 1; }
+
+    sleep 5
+  done
+  echo "Error: timed out (seed=$seed)"
+  return 1
+}
+
+# ── Generate ──────────────────────────────────────────────────────────
+RESULTS=()
+for v in $(seq 1 "$VARIATIONS"); do
+  current_seed=$((SEED + v - 1))
+  echo "Generating variation $v/$VARIATIONS (seed=$current_seed)..."
+  if result_seed=$(run_generation "$current_seed"); then
+    RESULTS+=("$result_seed")
+  fi
+done
+
+[[ ${#RESULTS[@]} -eq 0 ]] && { echo "Error: no images generated"; exit 1; }
+
+# ── Output ────────────────────────────────────────────────────────────
+for seed in "${RESULTS[@]}"; do
+  if [[ -n "$OUTPUT_FOLDER" ]]; then
+    echo "Uploading seed=$seed to Drive..."
+    gws drive files create \
+      --params '{"uploadType": "multipart"}' \
+      --json "{\"name\": \"generate-${seed}.png\", \"parents\": [\"$OUTPUT_FOLDER\"]}" \
+      --upload "$TMPDIR/output_${seed}.png" \
+      --fields "id,name,webViewLink"
+  elif [[ -n "$OUTPUT" && "$VARIATIONS" -eq 1 ]]; then
+    cp "$TMPDIR/output_${seed}.png" "$OUTPUT"
+    echo "Saved to: $OUTPUT (seed=$seed)"
+  else
+    local_path="/tmp/generate-${seed}.png"
+    cp "$TMPDIR/output_${seed}.png" "$local_path"
+    echo "Saved to: $local_path (seed=$seed)"
+  fi
+done
+
+echo "Done."
