@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Render a SketchUp export into a photorealistic image using ComfyUI + Flux.1.
+# Requires: COMFYUI_URL, GOOGLE_WORKSPACE_CLI_TOKEN (injected by RunCommand)
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: render --image <drive_file_id> --prompt <text> [options]
+
+Required:
+  --image <id>        Google Drive file ID of the input image
+  --prompt <text>     Description of desired look (materials, lighting, style)
+
+Optional:
+  --strength <0.0-1.0>  How closely to follow the 3D geometry (default: 0.85)
+  --steps <n>           Sampling steps, higher = better quality (default: 28)
+  --seed <n>            Random seed for reproducibility (default: random)
+  --width <n>           Output width in pixels (default: 1024)
+  --height <n>          Output height in pixels (default: 1024)
+  --renders-folder <id> Google Drive folder ID for output (optional)
+EOF
+  exit 1
+}
+
+# ── Parse arguments ───────────────────────────────────────────────────
+IMAGE_ID="" PROMPT="" STRENGTH=0.85 STEPS=28 SEED=$RANDOM
+WIDTH=1024 HEIGHT=1024 RENDERS_FOLDER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --image)    IMAGE_ID="$2"; shift 2 ;;
+    --prompt)   PROMPT="$2"; shift 2 ;;
+    --strength) STRENGTH="$2"; shift 2 ;;
+    --steps)    STEPS="$2"; shift 2 ;;
+    --seed)     SEED="$2"; shift 2 ;;
+    --width)    WIDTH="$2"; shift 2 ;;
+    --height)   HEIGHT="$2"; shift 2 ;;
+    --renders-folder) RENDERS_FOLDER="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -z "$IMAGE_ID" ]] && { echo "Error: --image is required"; usage; }
+[[ -z "$PROMPT" ]] && { echo "Error: --prompt is required"; usage; }
+[[ -z "$COMFYUI_URL" ]] && { echo "Error: COMFYUI_URL not set"; exit 1; }
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+# ── 1. Download image from Google Drive ───────────────────────────────
+echo "Downloading input image from Drive..."
+gws drive files get \
+  --params "{\"fileId\": \"$IMAGE_ID\", \"alt\": \"media\"}" \
+  -o "$TMPDIR/input.png"
+
+[[ -s "$TMPDIR/input.png" ]] || { echo "Error: failed to download image $IMAGE_ID"; exit 1; }
+
+# ── 2. Upload image to ComfyUI ───────────────────────────────────────
+echo "Uploading to ComfyUI..."
+UPLOAD_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/upload/image" \
+  -F "image=@$TMPDIR/input.png;filename=input.png" \
+  -F "overwrite=true")
+
+UPLOAD_NAME=$(echo "$UPLOAD_RESPONSE" | jq -r '.name // empty')
+[[ -n "$UPLOAD_NAME" ]] || { echo "Error: ComfyUI upload failed: $UPLOAD_RESPONSE"; exit 1; }
+echo "Uploaded as: $UPLOAD_NAME"
+
+# ── 3. Build and queue the workflow ───────────────────────────────────
+FULL_PROMPT="photorealistic architectural rendering, 8k, professional photography, $PROMPT"
+
+# Escape prompt for JSON
+ESCAPED_PROMPT=$(printf '%s' "$FULL_PROMPT" | jq -Rs '.')
+
+WORKFLOW=$(cat <<WORKFLOW_EOF
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux1-dev.safetensors", "weight_dtype": "default" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": { "clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn.safetensors", "type": "flux" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": $ESCAPED_PROMPT, "clip": ["2", 0] }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "", "clip": ["2", 0] }
+  },
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "6": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "$UPLOAD_NAME" }
+  },
+  "7": {
+    "class_type": "ControlNetLoader",
+    "inputs": { "control_net_name": "flux-depth-controlnet-v3.safetensors" }
+  },
+  "8": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["3", 0], "negative": ["4", 0],
+      "control_net": ["7", 0], "image": ["6", 0],
+      "strength": $STRENGTH, "start_percent": 0.0, "end_percent": 1.0,
+      "vae": ["5", 0]
+    }
+  },
+  "9": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": { "width": $WIDTH, "height": $HEIGHT, "batch_size": 1 }
+  },
+  "10": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0], "positive": ["8", 0], "negative": ["8", 1],
+      "latent_image": ["9", 0], "seed": $SEED, "steps": $STEPS,
+      "cfg": 3.5, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0
+    }
+  },
+  "11": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["10", 0], "vae": ["5", 0] }
+  },
+  "12": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["11", 0], "filename_prefix": "render" }
+  }
+}
+WORKFLOW_EOF
+)
+
+echo "Queuing render (seed=$SEED, strength=$STRENGTH, steps=$STEPS)..."
+QUEUE_RESPONSE=$(curl -sf -X POST "$COMFYUI_URL/prompt" \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\": $WORKFLOW}")
+
+PROMPT_ID=$(echo "$QUEUE_RESPONSE" | jq -r '.prompt_id // empty')
+[[ -n "$PROMPT_ID" ]] || { echo "Error: failed to queue workflow: $QUEUE_RESPONSE"; exit 1; }
+echo "Queued: $PROMPT_ID"
+
+# ── 4. Poll for completion ────────────────────────────────────────────
+echo "Rendering..."
+for i in $(seq 1 120); do
+  HISTORY=$(curl -sf "$COMFYUI_URL/history/$PROMPT_ID")
+  STATUS=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.completed // empty")
+
+  if [[ "$STATUS" == "true" ]]; then
+    FILENAME=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].outputs[\"12\"].images[0].filename // empty")
+    if [[ -n "$FILENAME" ]]; then
+      break
+    fi
+  fi
+
+  # Check for error
+  ERROR=$(echo "$HISTORY" | jq -r ".[\"$PROMPT_ID\"].status.status_str // empty")
+  if [[ "$ERROR" == "error" ]]; then
+    echo "Error: render failed"
+    echo "$HISTORY" | jq ".[\"$PROMPT_ID\"].status" 2>/dev/null
+    exit 1
+  fi
+
+  sleep 5
+done
+
+[[ -n "${FILENAME:-}" ]] || { echo "Error: render timed out after 10 minutes"; exit 1; }
+echo "Render complete: $FILENAME"
+
+# ── 5. Download result from ComfyUI ──────────────────────────────────
+curl -sf "$COMFYUI_URL/view?filename=$FILENAME&subfolder=&type=output" \
+  -o "$TMPDIR/output.png"
+
+[[ -s "$TMPDIR/output.png" ]] || { echo "Error: failed to download render result"; exit 1; }
+
+# ── 6. Upload to Google Drive (if renders folder specified) ──────────
+if [[ -n "$RENDERS_FOLDER" ]]; then
+  echo "Uploading to Drive..."
+  RESULT=$(gws drive files create \
+    --params "{\"uploadType\": \"multipart\"}" \
+    --json "{\"name\": \"render-${SEED}.png\", \"parents\": [\"$RENDERS_FOLDER\"]}" \
+    --upload "$TMPDIR/output.png" \
+    --fields "id,name,webViewLink")
+  echo "Uploaded to Drive:"
+  echo "$RESULT"
+else
+  # Output the local path so Erin can report it
+  OUTPUT_PATH="/tmp/render-${SEED}.png"
+  cp "$TMPDIR/output.png" "$OUTPUT_PATH"
+  echo "Saved to: $OUTPUT_PATH"
+  echo "Tip: provide --renders-folder <drive_folder_id> to upload directly to Drive."
+fi
+
+echo "Done. Seed=$SEED (use same seed to reproduce this exact result)."
