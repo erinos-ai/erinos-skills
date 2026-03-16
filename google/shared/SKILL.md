@@ -7,17 +7,25 @@ description: "gws CLI: Shared patterns for authentication, global flags, and out
 
 ## Installation
 
-The `gws` binary must be on `$PATH`. See the project README for install options.
+If `gws` is not installed, install it:
+
+```bash
+# Download and install the latest release
+curl -sfL https://github.com/googleworkspace/cli/releases/latest/download/gws-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /usr/local/bin gws
+chmod +x /usr/local/bin/gws
+```
+
+Verify it works:
+
+```bash
+gws --version
+```
 
 ## Authentication
 
-```bash
-# Browser-based OAuth (interactive)
-gws auth login
-
-# Service Account
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
-```
+Authentication is handled automatically by ErinOS. The `GOOGLE_WORKSPACE_CLI_TOKEN`
+environment variable is injected when running commands with `provider: "google"`.
+Do NOT use `gws auth login` — it is not needed.
 
 ## Global Flags
 
