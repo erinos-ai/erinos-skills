@@ -1,0 +1,87 @@
+name: Publish Skills Registry
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build registry
+        run: |
+          mkdir -p _site
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # Start JSON
+          echo '{"version":1,"updated_at":"'"$NOW"'","providers":{' > _site/index.json
+
+          FIRST=true
+          for provider_yml in */provider.yml; do
+            provider=$(dirname "$provider_yml")
+
+            # Create tarball
+            tar czf "_site/${provider}.tar.gz" "$provider"
+            SHA=$(sha256sum "_site/${provider}.tar.gz" | cut -d' ' -f1)
+
+            # Collect skill names and descriptions from SKILL.md frontmatter
+            SKILLS="[]"
+            DESC=""
+            for skill_md in "$provider"/*/SKILL.md; do
+              [ -f "$skill_md" ] || continue
+              name=$(sed -n 's/^name: *//p' "$skill_md" | head -1)
+              desc=$(sed -n 's/^description: *"\{0,1\}\(.*\)"\{0,1\}$/\1/p' "$skill_md" | head -1)
+              [ -z "$name" ] && continue
+              SKILLS=$(echo "$SKILLS" | jq --arg n "$name" '. + [$n]')
+              [ -n "$desc" ] && DESC="${DESC}${DESC:+ }${desc}"
+            done
+
+            # Append to JSON
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              echo ',' >> _site/index.json
+            fi
+
+            jq -n \
+              --arg desc "$DESC" \
+              --argjson skills "$SKILLS" \
+              --arg sha "$SHA" \
+              --arg url "https://skills.erinos.ai/${provider}.tar.gz" \
+              --arg provider "$provider" \
+              '{($provider): {description: $desc, skills: $skills, sha256: $sha, url: $url}}' \
+              | sed '1d;$d' >> _site/index.json
+
+          done
+
+          echo '}}' >> _site/index.json
+
+          # Pretty-print
+          jq . _site/index.json > _site/index_pretty.json
+          mv _site/index_pretty.json _site/index.json
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
