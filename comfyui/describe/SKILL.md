@@ -40,15 +40,3 @@ describe --input /tmp/photo.jpg --task detailed
 3. Returns the text description to stdout
 
 All processing happens locally on the appliance GPU.
-
-## Setup (one-time)
-
-Install the Florence-2 custom node for ComfyUI:
-
-```bash
-cd ~/ComfyUI/custom_nodes
-git clone https://github.com/kijai/ComfyUI-Florence2.git
-cd ComfyUI-Florence2 && pip install -r requirements.txt
-```
-
-The Florence-2 model (~1.5GB) is downloaded automatically on first use.

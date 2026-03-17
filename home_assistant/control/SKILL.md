@@ -7,17 +7,6 @@ description: "Home Assistant: Control devices, check states, call services."
 
 Control Home Assistant via its REST API using curl. The base URL and long-lived access token are available as `$HA_URL` and `$HA_TOKEN`.
 
-## Setup
-
-If not connected, guide the user through these steps:
-
-1. Ask the user for their Home Assistant URL (e.g. `http://192.168.1.100:8123`).
-2. Ask them to create a long-lived access token:
-   - Go to their HA profile page (click username bottom-left)
-   - Scroll to "Long-Lived Access Tokens"
-   - Click "Create Token", name it "erinos", copy the token
-3. Store both using store_credential with `{"url": "...", "token": "..."}`.
-
 ## Common Headers
 
 ```bash

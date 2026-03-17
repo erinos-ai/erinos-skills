@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Home Assistant provider setup script
+# Validates prerequisites. Credentials are stored via Erin conversation.
+
+step() { echo ""; echo "── $* ──"; }
+
+step "Prerequisites"
+
+if ! command -v curl &>/dev/null; then
+  echo "ERROR: curl is required but not installed."
+  exit 1
+fi
+echo "curl: ok"
+
+step "Setup complete"
+echo "To connect Home Assistant, tell Erin:"
+echo ""
+echo "  Connect my Home Assistant"
+echo ""
+echo "Erin will ask for your HA URL and long-lived access token."

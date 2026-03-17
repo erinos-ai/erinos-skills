@@ -9,27 +9,6 @@ Control Hue lights via the local bridge API (CLIP v2) using curl. The bridge IP 
 
 All requests use HTTPS with `-k` (the bridge uses a self-signed certificate).
 
-## Setup
-
-If not connected, guide the user through these steps:
-
-1. Discover the bridge:
-
-```bash
-curl -s https://discovery.meethue.com
-```
-
-2. Ask the user to press the button on their Hue bridge.
-
-3. Create an API key:
-
-```bash
-curl -s -k -X POST "https://BRIDGE_IP/api" \
-  -d '{"devicetype":"erinos#device","generateclientkey":true}'
-```
-
-4. Store the `bridge_ip` and `api_key` (username from response) using store_credential.
-
 ## Common Headers
 
 ```bash

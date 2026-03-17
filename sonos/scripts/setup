@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Sonos provider setup script
+# No local dependencies needed — Sonos uses OAuth + curl.
+
+echo "No additional setup needed."
+echo ""
+echo "To connect Sonos, run:"
+echo ""
+echo "  /authorize sonos"

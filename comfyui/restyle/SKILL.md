@@ -49,7 +49,3 @@ Describe the **target style**, not the image content:
 - **strength** 0.3-0.5: subtle style transfer, very close to original
 - **strength** 0.5-0.7: balanced — recognizable content with clear style change
 - **strength** 0.7-0.9: strong restyle, content may drift
-
-## Setup
-
-Uses the same Flux.1 model as the render skill. No additional models needed.

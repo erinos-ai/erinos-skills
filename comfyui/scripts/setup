@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ComfyUI provider setup script
+# Installs ComfyUI, downloads models, installs custom nodes.
+# Receives the provider directory as $1.
+#
+# Requires: python3, git, curl, pip
+# On AMD GPUs: installs ROCm PyTorch (not CUDA)
+
+COMFYUI_DIR="/opt/ComfyUI"
+MODELS="$COMFYUI_DIR/models"
+CUSTOM_NODES="$COMFYUI_DIR/custom_nodes"
+
+HF_BASE="https://huggingface.co"
+HF_TOKEN="${HF_TOKEN:-}"
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+step() { echo ""; echo "── $* ──"; }
+
+hf_download() {
+  local url="$1" dest="$2"
+  if [ -f "$dest" ]; then
+    echo "  already exists: $(basename "$dest")"
+    return
+  fi
+  echo "  downloading: $(basename "$dest")"
+  local args=(-fL -o "$dest" --progress-bar)
+  [ -n "$HF_TOKEN" ] && args+=(-H "Authorization: Bearer $HF_TOKEN")
+  curl "${args[@]}" "$url"
+}
+
+download() {
+  local url="$1" dest="$2"
+  if [ -f "$dest" ]; then
+    echo "  already exists: $(basename "$dest")"
+    return
+  fi
+  echo "  downloading: $(basename "$dest")"
+  curl -fL -o "$dest" --progress-bar "$url"
+}
+
+clone_node() {
+  local repo="$1" name="$2"
+  local dest="$CUSTOM_NODES/$name"
+  if [ -d "$dest" ]; then
+    echo "  already installed: $name"
+    return
+  fi
+  echo "  cloning: $name"
+  git clone --quiet "$repo" "$dest"
+  if [ -f "$dest/requirements.txt" ]; then
+    echo "  installing dependencies for $name"
+    "$COMFYUI_DIR/venv/bin/pip" install -q -r "$dest/requirements.txt"
+  fi
+}
+
+# ── 1. Install ComfyUI ──────────────────────────────────────────────
+
+step "ComfyUI"
+
+if [ -d "$COMFYUI_DIR" ] && [ -f "$COMFYUI_DIR/main.py" ]; then
+  echo "ComfyUI already installed at $COMFYUI_DIR"
+else
+  echo "Cloning ComfyUI..."
+  git clone --quiet https://github.com/comfyanonymous/ComfyUI.git "$COMFYUI_DIR"
+fi
+
+if [ ! -d "$COMFYUI_DIR/venv" ]; then
+  echo "Creating Python venv..."
+  python3 -m venv "$COMFYUI_DIR/venv"
+fi
+
+echo "Installing Python dependencies..."
+"$COMFYUI_DIR/venv/bin/pip" install -q -r "$COMFYUI_DIR/requirements.txt"
+
+# ── 2. PyTorch (ROCm for AMD, CUDA for NVIDIA) ──────────────────────
+
+step "PyTorch"
+
+if [ -d "/opt/rocm" ] || [ -d "/sys/class/kfd" ]; then
+  echo "AMD GPU detected — installing ROCm PyTorch"
+  "$COMFYUI_DIR/venv/bin/pip" install -q \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/rocm6.3
+else
+  echo "Installing default PyTorch (CUDA)"
+  "$COMFYUI_DIR/venv/bin/pip" install -q torch torchvision torchaudio
+fi
+
+# ── 3. Model directories ────────────────────────────────────────────
+
+mkdir -p "$MODELS"/{checkpoints,clip,vae,controlnet,upscale_models,facerestore_models}
+
+# ── 4. Open-access models ───────────────────────────────────────────
+
+step "Open-access models"
+
+download "$HF_BASE/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors" \
+  "$MODELS/clip/clip_l.safetensors"
+
+download "$HF_BASE/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors" \
+  "$MODELS/clip/t5xxl_fp8_e4m3fn.safetensors"
+
+download "$HF_BASE/XLabs-AI/flux-controlnet-collections/resolve/main/flux-depth-controlnet-v3.safetensors" \
+  "$MODELS/controlnet/flux-depth-controlnet-v3.safetensors"
+
+download "$HF_BASE/ai-forever/Real-ESRGAN/resolve/main/RealESRGAN_x4.pth" \
+  "$MODELS/upscale_models/RealESRGAN_x4.pth"
+
+download "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth" \
+  "$MODELS/facerestore_models/codeformer.pth"
+
+# ── 5. Gated models (require HF_TOKEN) ──────────────────────────────
+
+step "Gated models (Flux.1-dev)"
+
+if [ -z "$HF_TOKEN" ]; then
+  echo "HF_TOKEN not set — skipping gated model downloads."
+  echo ""
+  echo "To download Flux.1-dev models:"
+  echo "  1. Accept the license: https://huggingface.co/black-forest-labs/FLUX.1-dev"
+  echo "  2. Create a token: https://huggingface.co/settings/tokens (Read access)"
+  echo "  3. Re-run: HF_TOKEN=<token> /skills install comfyui"
+else
+  hf_download "$HF_BASE/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors" \
+    "$MODELS/vae/ae.safetensors"
+
+  hf_download "$HF_BASE/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors" \
+    "$MODELS/checkpoints/flux1-dev.safetensors"
+fi
+
+# ── 6. SVD model (for animate skill) ────────────────────────────────
+
+step "SVD model (animate)"
+
+hf_download "$HF_BASE/stabilityai/stable-video-diffusion-img2vid-xt/resolve/main/svd_xt.safetensors" \
+  "$MODELS/checkpoints/svd_xt.safetensors"
+
+# ── 7. Custom nodes ─────────────────────────────────────────────────
+
+step "Custom nodes"
+
+clone_node "https://github.com/Fannovel16/comfyui_controlnet_aux.git" "comfyui_controlnet_aux"
+clone_node "https://github.com/kijai/ComfyUI-Florence2.git" "ComfyUI-Florence2"
+clone_node "https://github.com/yolain/ComfyUI-Easy-Use.git" "ComfyUI-Easy-Use"
+clone_node "https://github.com/Fannovel16/ComfyUI-FaceRestore.git" "ComfyUI-FaceRestore"
+
+# ── 8. Permissions ───────────────────────────────────────────────────
+
+step "Permissions"
+
+if id erinos &>/dev/null; then
+  chown -R erinos: "$COMFYUI_DIR"
+  echo "Set ownership to erinos"
+else
+  echo "User 'erinos' not found — skipping chown"
+fi
+
+# ── Done ─────────────────────────────────────────────────────────────
+
+step "Setup complete"
+echo "ComfyUI is installed at $COMFYUI_DIR"
+echo "Start it with: cd $COMFYUI_DIR && source venv/bin/activate && python main.py --listen 0.0.0.0 --port 8188"

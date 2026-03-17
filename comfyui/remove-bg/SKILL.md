@@ -29,15 +29,3 @@ remove-bg --image <drive_file_id> --output-folder <drive_folder_id>
 4. Saves or uploads the result
 
 All processing happens locally on the appliance GPU. Fast — typically under 5 seconds.
-
-## Setup (one-time)
-
-Install the RMBG custom node for ComfyUI:
-
-```bash
-cd ~/ComfyUI/custom_nodes
-git clone https://github.com/yolain/ComfyUI-Easy-Use.git
-cd ComfyUI-Easy-Use && pip install -r requirements.txt
-```
-
-The RMBG-2.0 model (~170MB) is downloaded automatically on first use.

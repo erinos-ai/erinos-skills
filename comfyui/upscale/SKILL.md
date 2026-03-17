@@ -29,12 +29,3 @@ upscale --image <drive_file_id> --output-folder <drive_folder_id>
 3. Saves or uploads the high-resolution result
 
 All processing happens locally on the appliance GPU.
-
-## Setup (one-time)
-
-Download the upscale model:
-
-```bash
-wget -P ~/ComfyUI/models/upscale_models/ \
-  https://huggingface.co/ai-forever/Real-ESRGAN/resolve/main/RealESRGAN_x4.pth
-```

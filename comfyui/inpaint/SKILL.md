@@ -52,7 +52,3 @@ Describe only **what should appear in the masked region**:
 - "large fiddle leaf fig plant in a white ceramic pot"
 - "floor-to-ceiling bookshelf, walnut wood, filled with books"
 - "clear blue sky with wispy clouds"
-
-## Setup
-
-Uses the same Flux.1 model as the render skill. No additional models needed.

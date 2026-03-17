@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Spotify provider setup script
+# No local dependencies needed — Spotify uses OAuth + curl.
+
+echo "No additional setup needed."
+echo ""
+echo "To connect Spotify, run:"
+echo ""
+echo "  /authorize spotify"

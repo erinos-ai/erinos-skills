@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Google provider setup script
+# Installs the gws CLI tool.
+
+INSTALL_DIR="/usr/local/bin"
+
+step() { echo ""; echo "── $* ──"; }
+
+# ── Detect architecture ─────────────────────────────────────────────
+
+step "gws CLI"
+
+if command -v gws &>/dev/null; then
+  echo "gws already installed: $(gws --version)"
+  exit 0
+fi
+
+ARCH="$(uname -m)"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+case "$ARCH" in
+  x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+  aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+  arm64)   TARGET="aarch64-apple-darwin" ;;
+  *)       echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+# Adjust target for macOS
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
+  TARGET="x86_64-apple-darwin"
+fi
+
+echo "Installing gws for $TARGET..."
+
+curl -sfL "https://github.com/googleworkspace/cli/releases/latest/download/gws-${TARGET}.tar.gz" \
+  | tar xz --strip-components=1 -C "$INSTALL_DIR" "gws-${TARGET}/gws"
+
+echo "Installed: $(gws --version)"
+
+step "Setup complete"
+echo "Authenticate with: /authorize google"

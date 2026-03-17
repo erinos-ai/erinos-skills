@@ -50,7 +50,3 @@ Be specific and descriptive:
 - **steps** 28-30: best quality for Flux.1
 - **cfg** 2.0-4.0: Flux.1 works best with low guidance. Higher values cause artifacts
 - **seed**: use `--variations 3` to get multiple options, then re-run with the best seed
-
-## Setup
-
-Uses the same Flux.1 model as the render skill. No additional models needed.
